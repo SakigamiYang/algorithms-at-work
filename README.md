@@ -1,2 +1,11 @@
-# algorithms-at-work
-There are a lot of code repositories on GitHub for data structures and algorithms, and a lot of code repositories for a list of solutions to LeetCode (or some other similar sites) questions. But I think most of the algorithmic scenarios are actually pretty hard to come across at work. Therefore, in this code repository, I will try to stick to a long period of time to keep updating some algorithmic scenarios and implement them with some simple code. These algorithmic scenarios are common at work or will be encountered in re-used components.
+# 你在工作中能见到的算法
+
+我们在 GitHub 上已经看到了许多关于数据结构、算法、以及力扣题解等相关内容的仓库。
+
+但我觉得大多数内容所涉及到的场景在一些普通的开发工作中出现的并不多，全部学习容易让初学者抓不到重点。
+
+因此，我想要努力尝试坚持一段比较长的时间，来持续更新一个代码仓库。其内容为我个人所认为的，在工作中比较常见的数据结构和算法。
+
+在选定内容时我会参考一些常见的可复用组件，如队列、中间件、网络协议、甚至系统设计等。
+
+我相信这样做不仅能让大家看到一些常见的数据结构和算法的解决方案，还能同时找到一些对工作中常用工具的感觉。
