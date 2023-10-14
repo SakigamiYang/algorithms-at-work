@@ -1,2 +1,2 @@
 # algorithms-at-work
-A repository about the algorithms that you can see at work.
+There are a lot of code repositories on GitHub for data structures and algorithms, and a lot of code repositories for a list of solutions to LeetCode (or some other similar sites) questions. But I think most of the algorithmic scenarios are actually pretty hard to come across at work. Therefore, in this code repository, I will try to stick to a long period of time to keep updating some algorithmic scenarios and implement them with some simple code. These algorithmic scenarios are common at work or will be encountered in re-used components.
