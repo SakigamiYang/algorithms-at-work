@@ -1,20 +1,17 @@
 # coding: utf-8
-__all__ = ['PoolError', 'PoolFullError', 'PoolClosedError']
+__all__ = [
+    'TooManyObjectsError',
+    'ChildDeadlockedError',
+]
 
 
 class PoolError(Exception):
-    """General pool exception."""
+    """对象池异常"""
 
 
-class PoolFullError(PoolError):
-    """Exception raised when create new object for a full-sized pool."""
-
-    def __init__(self) -> None:
-        super().__init__("The pool has reached its maximum size.")
+class TooManyObjectsError(PoolError):
+    """对象池超过最大容量异常"""
 
 
-class PoolClosedError(PoolError):
-    """Exception raised when an operation is executed on a closed pool."""
-
-    def __init__(self) -> None:
-        super().__init__("Pool is closed")
+class ChildDeadlockedError(PoolError):
+    """在子进程被 fork 后死锁异常"""

@@ -1,209 +1,134 @@
 # coding: utf-8
-import queue
-from abc import ABCMeta, abstractmethod
-from contextlib import contextmanager
-from queue import SimpleQueue
-from threading import Event, Semaphore, Condition, BoundedSemaphore, Lock
-from typing import Generic, TypeVar, Optional, Generator
-
-from loguru import logger
+from os import getpid
+from threading import Lock
+from typing import Optional, TypeVar, Callable
 
 from .exception import *
 
-__all__ = ['Manager', 'Pool']
+__all__ = ['ObjectPool']
 
 DEFAULT_SIZE = 10
 
-_T = TypeVar("_T")
+
+class PooledObject:
+    """可池化对象
+    一般这种对象的生产都要耗费巨大的资源，所以基本都支持一个 close() 方法。但并非必须的。"""
+
+    def __init__(self):
+        self._pid = getpid()  # 用来防止进程 fork 检测
+
+    @property
+    def pid(self):
+        return self._pid
+
+    def close(self):
+        """释放对象资源"""
+        pass
 
 
-class Manager(Generic[_T], metaclass=ABCMeta):
-    """A manager for the lifecycles of pool objects."""
-
-    @abstractmethod
-    def create(self) -> _T:
-        """Create a new pool object."""
-
-    @abstractmethod
-    def recycle(self, __obj: _T) -> None:
-        """Check liveness and reset released objects.
-
-        If the object is no longer valid, this method should raise an exception
-        to signal it and prevent its return to the pool.
-
-        :arg __obj: The object to return.
-        :raise user defined exception: When the object is no longer valid."""
-
-    @abstractmethod
-    def discard(self, __obj: _T) -> None:
-        """Perform cleanup of discarded objects.
-
-        This method is called for discarding both invalid objects that failed the
-        recycling and live objects on pool closure. Liveness should not be assumed and
-        this method should ideally not raise any exception unless there's a failure
-        that will lead to a resource leak.
-
-        :arg __obj: The object to be discarded."""
+_T_PooledObject = TypeVar("_T_PooledObject", bound=PooledObject)
 
 
-class PoolState(Generic[_T]):
-    """An object that records the state of the pool,
-    preventing thread resource concurrent problems"""
-    __is_open: Event
-    __count: Semaphore
-    __lock: Condition
-    __idle: SimpleQueue[_T]
+class ObjectPool:
+    """对象池"""
 
     def __init__(self,
-                 is_open: Event,
-                 count: Semaphore,
-                 lock: Condition,
-                 idle: SimpleQueue[_T]):
-        self.__is_open = is_open
-        self.__count = count
-        self.__lock = lock
-        self.__idle = idle
+                 object_factory: Callable[..., _T_PooledObject],
+                 max_size: Optional[int] = None):
+        """初始化
 
-    @property
-    def is_open(self):
-        return self.__is_open
+        :arg object_factory: 对象生产工厂方法
+        :arg max_size: 可选。对象池最大容量"""
 
-    @property
-    def count(self):
-        return self.__count
-
-    @property
-    def lock(self):
-        return self.__lock
-
-    @property
-    def idle(self):
-        return self.__idle
-
-
-class Pool(Generic[_T]):
-    """Object pool."""
-
-    __manager: Manager[_T]
-    __max_size: int
-    __state: PoolState[_T]
-
-    def __init__(self, manager: Manager[_T], max_size: Optional[int] = None) -> None:
-        """Initializer.
-
-        :arg manager: The object manager to use.
-        :arg max_size: Optional. The maximum number of concurrent objects available."""
-
-        if max_size <= 0:
-            raise ValueError("max_size must be at least 1")
         max_size = max_size or DEFAULT_SIZE
-        self.__manager = manager
-        self.__max_size = max_size
-        self.__init_state()
+        if not isinstance(max_size, int) or max_size < 0:
+            raise ValueError("'max_size' must be a positive integer")
 
-    def __init_state(self) -> None:
-        self.__state = PoolState(
-            is_open=Event(),
-            count=BoundedSemaphore(self.__max_size),
-            lock=Condition(Lock()),
-            idle=SimpleQueue(),
-        )
+        self._object_factory = object_factory
+        self._max_size = max_size
 
-    @property
-    def is_open(self) -> bool:
-        """Check if the pool is open.
+        # 用来保护 _checkpid() 的锁，如果 pid 改变了，比如进程被 fork 了，该锁将会被获取。
+        # 再此期间，子进程中的多个线程会抢锁，第一个抢到的线程会重置数据结构并锁定该池的对象。
+        # 随后的线程在成功获取该锁并发现第一个线程完成工作后，释放该锁。
+        self._fork_lock = Lock()
+        self.reset()
 
-        :return: Bool. Whether the pool is open."""
+    def reset(self) -> None:
+        """重置线程池"""
 
-        return self.__state.is_open.is_set()
+        self._lock = Lock()
+        self._created_objects = 0
+        self._available_objects = []
+        self._in_use_objects = set()
 
-    def open(self) -> None:
-        """Open the pool."""
+        # 注意这里必须是 reset() 函数的最后一句。
+        # 因为如果先取得 pid ，则一个线程在执行 reset() 中时，
+        # 其它线程执行了 _checkpid() ,就会获取到不一样的 pid ，
+        # 而此时该线程的的 reset() 还没有执行完。
+        self.pid = getpid()
 
-        self.__state.is_open.set()
+    def _checkpid(self) -> None:
+        """该方法用来在现代系统上保证 fork 安全。所有操作池状态的方法都会调用该方法，
+        该方法通过比较在池对象中存储的进程 ID 和当前进程 ID 来确定进程是否被 fork 。
+        如果不通，则子进程不能使用父进程的文件描述符（如套接字），此时子进程应该调用 reset() 方法来重置池对象。
 
-    def close(self) -> None:
-        """Close the pool and discard its all objects."""
+        _checkpid() 将会由 self._fork_lock 来保证不会被子进程中的多个线程调用多次。
 
-        state = self.__state
+        但是这有一个非常小概率的失败场景：
+          1. A 进程第一次调用 _checkpid() 并获取了锁 self._fork_lock。
+          2. A 进程在持有锁的当中被其下某个线程 fork 了。
+          3. fork 出的子进程 B 继承了父进程的池状态，该状态中伴有一个 _fork_lock ，而由于资源隔离，
+             进程 B 永远不可能通知进程 A 释放该锁。
 
-        if not state.is_open.is_set():
-            return
+        为了避免这个死锁问题， _checkpid() 在获取锁时只会等待 5 秒。失败则判断为
+        子进程死锁，并抛出 ChildDeadlockedError 异常。"""
 
-        self.__init_state()
-        state.is_open.clear()
-
-        while True:
+        if self.pid != getpid():
+            acquired = self._fork_lock.acquire(timeout=5.)
+            if not acquired:
+                raise ChildDeadlockedError
+            # 调用 reset() ，如果其它线程没有这么干
             try:
-                pass
-            except queue.Empty:
-                break
-            except Exception:
-                logger.opt(exception=True).warning("Discard error, possible resource leak")
-
-        with state.lock:
-            state.lock.notify_all()
-
-    @contextmanager
-    def acquire(self) -> Generator[_T, None, None]:
-        """Acquire an object from the pool.
-
-        :return: A generator of pooled object."""
-
-        state = self.__state
-
-        while True:
-            if not state.is_open.is_set():
-                raise PoolClosedError()
-
-            # Try getting object from the pool first
-            try:
-                obj = state.idle.get_nowait()
-                logger.debug(f"Checked out object from pool: {obj}")
-                break
-            except queue.Empty:
-                pass
-
-            # If we can allocate more, create a new one
-            if state.count.acquire(blocking=False):
-                try:
-                    obj = self.__manager.create()
-                    logger.debug(f"Created new object: {obj}")
-                    break
-                except:
-                    state.count.release()
-                    raise PoolFullError()
-
-            # Wait until an object is available or we can allocate more
-            with state.lock:
-                logger.debug("Waiting for free object or slot")
-                state.lock.wait()
-
-        try:
-            yield obj
-        finally:
-            try:
-                if not state.is_open.is_set():
-                    raise PoolClosedError()
-
-                self.__manager.recycle(obj)
-                logger.debug(f"Object succeeded recycle: {obj}")
-
-                if not state.is_open.is_set():
-                    raise PoolClosedError()
-
-                state.idle.put(obj)
-                logger.debug(f"Object returned to pool: {obj}")
-            except Exception:
-                logger.opt(exception=True).debug(f"Recycle failed discarding: {obj}")
-                try:
-                    self.__manager.discard(obj)
-                except Exception:
-                    logger.opt(exception=True).warning("Discard error, possible resource leak")
-                state.count.release()
+                if self.pid != getpid():
+                    self.reset()
             finally:
-                with state.lock:
-                    state.lock.notify()
+                self._fork_lock.release()
 
+    def get_object(self) -> _T_PooledObject:
+        """获得一个对象"""
 
-_T_Pool = TypeVar("_T_Pool", bound=Pool)
+        self._checkpid()
+        with self._lock:
+            try:
+                obj = self._available_objects.pop()
+            except IndexError:
+                obj = self._make_object()
+            self._in_use_objects.add(obj)
+        return obj
+
+    def _make_object(self) -> _T_PooledObject:
+        if self._created_objects >= self._max_size:
+            raise TooManyObjectsError
+        self._created_objects += 1
+        return self._object_factory()
+
+    def release(self, obj: _T_PooledObject) -> None:
+        """释放对象
+
+        :arg obj: 要释放的对象"""
+
+        self._checkpid()
+        with self._lock:
+            try:
+                self._in_use_objects.remove(obj)
+            except KeyError:
+                pass
+
+            if self._owns_object(obj):
+                self._available_objects.append(obj)
+            else:
+                # 目标对象不由该对象池持有（比如进程被 fork 的情况），则直接扔掉，为对象池空出一个位置
+                self._created_objects -= 1
+
+    def _owns_object(self, obj: _T_PooledObject) -> bool:
+        return obj.pid == self.pid
