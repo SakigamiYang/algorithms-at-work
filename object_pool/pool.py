@@ -3,9 +3,9 @@ from os import getpid
 from threading import Lock
 from typing import Optional, TypeVar, Callable
 
-from .exception import *
+from object_pool.exception import *
 
-__all__ = ['ObjectPool']
+__all__ = ['PooledObject', 'ObjectPool']
 
 DEFAULT_SIZE = 10
 
