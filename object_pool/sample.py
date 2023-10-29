@@ -27,7 +27,7 @@ print(f'obj_id_list = {obj_id_list}')
 
 # 随机还回 1 个对象
 pool.release(obj_list[randrange(0, len(obj_id_list))])
-# 在索取 1 个对象
+# 再索取 1 个对象
 begin_time = perf_counter()
 obj_again = pool.get_object()
 end_time = perf_counter()
